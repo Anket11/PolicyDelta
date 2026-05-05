@@ -78,3 +78,38 @@ async def list_audits(
     return Page(
         items=[AuditRunOut.model_validate(row) for row in rows],
         total=int(total),
+        limit=page.limit,
+        offset=page.offset,
+    )
+
+
+@router.get(
+    "/{run_id}/findings",
+    operation_id="list_audit_findings",
+    response_model=Page[FindingOut],
+)
+async def list_audit_findings(
+    run_id: int, _principal: ReadPrincipal, session: TenantSessionDep, page: PageParamsDep
+) -> Page[FindingOut]:
+    run = await session.get(AuditRun, run_id)
+    if run is None:
+        raise NotFoundError("Audit run", run_id)
+    base = select(AuditFinding).where(col(AuditFinding.run_id) == run_id)
+    total = (await session.execute(select(func.count()).select_from(base.subquery()))).scalar_one()
+    rows = (
+        (
+            await session.execute(
+                base.order_by(col(AuditFinding.clause_index), col(AuditFinding.id))
+                .limit(page.limit)
+                .offset(page.offset)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return Page(
+        items=[FindingOut.model_validate(row) for row in rows],
+        total=int(total),
+        limit=page.limit,
+        offset=page.offset,
+    )
