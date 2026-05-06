@@ -70,3 +70,53 @@ async def get_document(
     )
 
 
+@router.post(
+    "/search",
+    operation_id="search_regulatory",
+    response_model=RegulatorySearchResponse,
+)
+async def search(
+    body: RegulatorySearchRequest,
+    _principal: ReadPrincipal,
+    session: SessionDep,
+    embedder: EmbedderDep,
+) -> RegulatorySearchResponse:
+    as_of = resolve_as_of(body.as_of_date)
+    candidates = await search_regulations(
+        session,
+        embedder,
+        query=body.query,
+        jurisdiction=body.jurisdiction,
+        as_of=as_of,
+        top_k=body.top_k,
+    )
+    items = [
+        ChunkHit(
+            **ChunkOut.model_validate(candidate.chunk).model_dump(),
+            score=None if candidate.distance is None else round(1.0 - candidate.distance, 6),
+            weak_match=candidate.weak_match,
+            source=candidate.source,
+        )
+        for candidate in candidates
+    ]
+    return RegulatorySearchResponse(jurisdiction=body.jurisdiction, as_of_date=as_of, items=items)
+
+
+@router.get(
+    "/documents/{document_id}/chunks",
+    operation_id="list_regulatory_document_chunks",
+    response_model=Page[ChunkOut],
+)
+async def list_document_chunks(
+    document_id: int, _principal: ReadPrincipal, session: SessionDep, page: PageParamsDep
+) -> Page[ChunkOut]:
+    found = await corpus.list_chunks(session, document_id, page)
+    if found is None:
+        raise NotFoundError("Regulatory document", document_id)
+    chunks, total = found
+    return Page(
+        items=[ChunkOut.model_validate(chunk) for chunk in chunks],
+        total=total,
+        limit=page.limit,
+        offset=page.offset,
+    )
