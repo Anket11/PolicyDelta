@@ -76,3 +76,13 @@ def build_user_payload(
         )
         used_chars += len(content)
 
+    payload = json.dumps(
+        {
+            "as_of": as_of.isoformat(),
+            "jurisdiction": jurisdiction,
+            "excerpts": excerpts,
+            "policy_clause": clause_text,
+        },
+        ensure_ascii=False,
+    )
+    return payload, ref_map
