@@ -147,3 +147,5 @@ async def execute_audit_run(
         coverage=result.coverage,
         dropped_ungrounded=dropped,  # the hallucination canary
         total_tokens=run.total_tokens,
+        cost_usd=run.cost_usd,
+    )
