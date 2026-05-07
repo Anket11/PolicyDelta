@@ -74,3 +74,150 @@ class PipelineResult:
     retrieved_chunk_ids: list[int]
 
 
+async def _retrieve_for_clause(
+    session: AsyncSession,
+    clause: PolicyClause,
+    clause_vector: list[float],
+    *,
+    jurisdiction: str,
+    as_of: dt.date,
+) -> list[Candidate]:
+    vector_hits = await vector_search(
+        session, clause_vector, jurisdiction=jurisdiction, as_of=as_of, top_k=TOP_K_PER_CLAUSE
+    )
+    citation_hits = await citation_lookup(
+        session, clause.text, jurisdiction=jurisdiction, as_of=as_of
+    )
+    return merge_candidates(vector_hits, citation_hits, top_k=TOP_K_PER_CLAUSE)
+
+
+async def _judge_clause(
+    chat: ChatProvider,
+    clause: PolicyClause,
+    candidates: list[Candidate],
+    *,
+    jurisdiction: str,
+    as_of: dt.date,
+    source_urls: dict[int, tuple[int, str]],  # document_id -> (document_id, source_url)
+    semaphore: asyncio.Semaphore,
+) -> ClauseOutcome:
+    outcome = ClauseOutcome(
+        clause=clause,
+        verdict=None,
+        retrieved_chunk_ids=[c.chunk.id for c in candidates if c.chunk.id is not None],
+    )
+    if not candidates:
+        outcome.verdict = Verdict.INSUFFICIENT_EVIDENCE
+        return outcome
+
+    user_payload, ref_map = build_user_payload(
+        clause_text=clause.text, jurisdiction=jurisdiction, as_of=as_of, candidates=candidates
+    )
+    try:
+        async with semaphore:
+            raw_verdict, usage = await chat.complete_structured(
+                system=SYSTEM_PROMPT, user=user_payload, response_model=ClauseVerdict
+            )
+        outcome.usage = usage
+    except Exception as exc:
+        logger.exception("clause_audit_failed", clause_index=clause.index)
+        outcome.error = type(exc).__name__
+        return outcome
+
+    weak_retrieval = any(candidate.weak_match for candidate in candidates)
+    for finding in raw_verdict.findings:
+        candidate = ref_map.get(finding.ref_id)
+        if candidate is None or candidate.chunk.id is None:
+            outcome.dropped_ungrounded += 1
+            continue
+        if not quote_is_grounded(finding.grounding_quote, candidate.chunk.content):
+            outcome.dropped_ungrounded += 1
+            continue
+        document = source_urls.get(candidate.chunk.document_id)
+        outcome.findings.append(
+            ResolvedFinding(
+                clause_index=clause.index,
+                offending_policy_text=clause.text,
+                legal_rule_text=candidate.chunk.content,  # from DB
+                citation=candidate.chunk.legal_citation,  # from DB
+                source_chunk_id=candidate.chunk.id,
+                source_document_id=document[0] if document else None,
+                source_url=document[1] if document else "",
+                risk_level=finding.risk_level.value,
+                grounding_quote=finding.grounding_quote,
+                rationale=finding.rationale,
+                suggested_fix=finding.suggested_fix,
+                confidence=raw_verdict.confidence,
+                needs_review=weak_retrieval or raw_verdict.confidence < LOW_CONFIDENCE_THRESHOLD,
+            )
+        )
+
+    if raw_verdict.verdict is Verdict.VIOLATION and not outcome.findings:
+        # Everything the model claimed failed grounding — hallucination caught.
+        outcome.verdict = Verdict.INSUFFICIENT_EVIDENCE
+    else:
+        outcome.verdict = raw_verdict.verdict
+    return outcome
+
+
+def rollup(outcomes: list[ClauseOutcome]) -> tuple[RunStatus, RunVerdict | None, dict[str, int]]:
+    coverage = {"violation": 0, "compliant": 0, "insufficient_evidence": 0, "error": 0}
+    for outcome in outcomes:
+        if outcome.error is not None:
+            coverage["error"] += 1
+        elif outcome.verdict is Verdict.VIOLATION:
+            coverage["violation"] += 1
+        elif outcome.verdict is Verdict.COMPLIANT:
+            coverage["compliant"] += 1
+        else:
+            coverage["insufficient_evidence"] += 1
+
+    status = RunStatus.PARTIAL if coverage["error"] else RunStatus.SUCCEEDED
+    verdict: RunVerdict | None
+    if coverage["violation"]:
+        verdict = RunVerdict.VIOLATIONS_FOUND
+    elif coverage["error"]:
+        verdict = None  # never COMPLIANT when clauses errored
+    elif coverage["compliant"]:
+        verdict = RunVerdict.COMPLIANT
+    elif coverage["insufficient_evidence"]:
+        verdict = RunVerdict.INSUFFICIENT_EVIDENCE
+    else:
+        verdict = None
+    return status, verdict, coverage
+
+
+async def run_audit_pipeline(
+    session: AsyncSession,
+    embedder: EmbeddingProvider,
+    chat: ChatProvider,
+    *,
+    policy_text: str,
+    jurisdiction: str,
+    as_of: dt.date,
+) -> PipelineResult:
+    clauses = split_policy(policy_text)
+    vectors = await embedder.embed([clause.text for clause in clauses])
+
+    candidates_per_clause: list[list[Candidate]] = []
+    for clause, vector in zip(clauses, vectors, strict=True):
+        candidates_per_clause.append(
+            await _retrieve_for_clause(
+                session, clause, vector, jurisdiction=jurisdiction, as_of=as_of
+            )
+        )
+
+    document_ids = {
+        candidate.chunk.document_id
+        for candidates in candidates_per_clause
+        for candidate in candidates
+    }
+    source_urls: dict[int, tuple[int, str]] = {}
+    if document_ids:
+        rows = await session.execute(
+            select(col(RegulatoryDocument.id), col(RegulatoryDocument.source_url)).where(
+                col(RegulatoryDocument.id).in_(document_ids)
+            )
+        )
+        source_urls = {row[0]: (row[0], row[1]) for row in rows.fetchall()}
+
