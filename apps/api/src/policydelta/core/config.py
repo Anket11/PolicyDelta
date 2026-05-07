@@ -78,3 +78,9 @@ class Settings(BaseSettings):
         if self.ai_provider != "openai" or not self.openai_api_key:
             msg = "Prod requires ai_provider=openai with OPENAI_API_KEY set"
             raise ValueError(msg)
+        return self
+
+
+@lru_cache
+def get_settings() -> Settings:
+    return Settings()
