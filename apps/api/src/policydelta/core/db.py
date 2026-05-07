@@ -76,3 +76,19 @@ async def get_session() -> AsyncIterator[AsyncSession]:
             raise
 
 
+def make_db_readiness_check(engine: AsyncEngine) -> Callable[[], Awaitable[bool]]:
+    async def check_database() -> bool:
+        async with engine.connect() as conn:
+            await conn.execute(text("SELECT 1"))
+        return True
+
+    return check_database
+
+
+async def dispose_engines() -> None:
+    for factory in (get_engine, get_worker_engine):
+        if factory.cache_info().currsize:
+            await factory().dispose()
+    get_engine.cache_clear()
+    get_worker_engine.cache_clear()
+    get_sessionmaker.cache_clear()
