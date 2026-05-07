@@ -155,3 +155,67 @@ def status(
         typer.echo(f"[{job.id}] {job.kind} {job.status} attempts={job.attempts}{error}")
 
 
+@app.command("confirm")
+def confirm_doc(document_id: int) -> None:
+    """Clear a review-quarantined document into retrieval (operator judgment)."""
+    _run(ingest_ops.confirm(document_id))
+    typer.echo(f"Document {document_id} confirmed — now retrievable.")
+
+
+@app.command("supersede")
+def supersede_doc(
+    new_document_id: int,
+    supersedes: int = typer.Option(..., "--supersedes", help="The OLD document id"),
+    relation: str = typer.Option("amends", "--relation", help="amends|repeals|replaces"),
+) -> None:
+    """Close the old document's validity intervals + record lineage + flag stale runs."""
+    report = _run(
+        ingest_ops.supersede(
+            new_document_id=new_document_id, old_document_id=supersedes, relation=relation
+        )
+    )
+    typer.echo(
+        f"Superseded {report.superseded_chunks} chunk(s) effective "
+        f"{report.supersession_effective_date}; {report.stale_runs_flagged} past audit "
+        f"run(s) flagged stale."
+    )
+
+
+@app.command("backfill-embeddings")
+def backfill_embeddings() -> None:
+    """Embed every chunk still missing a vector (crash-resume path)."""
+    embedded = _run(ingest_ops.backfill_embeddings())
+    typer.echo(f"Embedded {embedded} chunk(s).")
+
+
+@app.command("retry")
+def retry(job_id: int) -> None:
+    """Re-queue a failed job."""
+    if _run(ingest_ops.retry_job(job_id)):
+        typer.echo(f"Job {job_id} re-queued.")
+    else:
+        typer.echo(f"Job {job_id} is not in a failed state.", err=True)
+        raise typer.Exit(code=1)
+
+
+_OPENAPI_OUTPUT_ARG = typer.Argument(Path("../../packages/contracts/openapi.json"))
+
+
+@app.command("export-openapi")
+def export_openapi(output: Path = _OPENAPI_OUTPUT_ARG) -> None:
+    """Export the OpenAPI schema — the frozen contract for the UI and n8n."""
+    from policydelta.core.config import Settings  # noqa: PLC0415 — keep CLI startup light
+    from policydelta.main import create_app  # noqa: PLC0415
+
+    schema = create_app(Settings(worker_enabled=False, log_level="WARNING")).openapi()
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(schema, indent=2) + "\n", encoding="utf-8")
+    typer.echo(f"OpenAPI schema written to {output}")
+
+
+def main() -> None:
+    app()
+
+
+# Re-export for [project.scripts]
+run: Callable[[], None] = main
