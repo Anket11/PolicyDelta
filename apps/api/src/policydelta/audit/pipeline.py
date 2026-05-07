@@ -221,3 +221,35 @@ async def run_audit_pipeline(
         )
         source_urls = {row[0]: (row[0], row[1]) for row in rows.fetchall()}
 
+    semaphore = asyncio.Semaphore(CLAUSE_CONCURRENCY)
+    outcomes = list(
+        await asyncio.gather(
+            *(
+                _judge_clause(
+                    chat,
+                    clause,
+                    candidates,
+                    jurisdiction=jurisdiction,
+                    as_of=as_of,
+                    source_urls=source_urls,
+                    semaphore=semaphore,
+                )
+                for clause, candidates in zip(clauses, candidates_per_clause, strict=True)
+            )
+        )
+    )
+
+    status, verdict, coverage = rollup(outcomes)
+    all_chunk_ids = sorted(
+        {chunk_id for outcome in outcomes for chunk_id in outcome.retrieved_chunk_ids}
+    )
+    return PipelineResult(
+        clauses=clauses,
+        outcomes=outcomes,
+        status=status,
+        verdict=verdict,
+        coverage=coverage,
+        total_prompt_tokens=sum(outcome.usage.prompt_tokens for outcome in outcomes),
+        total_completion_tokens=sum(outcome.usage.completion_tokens for outcome in outcomes),
+        retrieved_chunk_ids=all_chunk_ids,
+    )
