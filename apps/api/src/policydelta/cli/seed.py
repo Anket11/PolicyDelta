@@ -153,3 +153,27 @@ async def seed_corpus(engine: AsyncEngine, embedder: EmbeddingProvider | None = 
 
         await _ensure_supersessions(session, doc_ids)
 
+        for org_name, jurisdiction in SEED_ORGS:
+            await session.execute(
+                text(
+                    "INSERT INTO organizations (name, home_jurisdiction) "
+                    "VALUES (:name, :jur) ON CONFLICT (name) DO NOTHING"
+                ),
+                {"name": org_name, "jur": jurisdiction},
+            )
+
+        await session.commit()
+    logger.info("seed_complete", documents_inserted=inserted)
+    return inserted
+
+
+async def seed_with_default_engine() -> int:
+    engine = create_async_engine(
+        get_settings().database_url_owner,
+        poolclass=NullPool,
+        connect_args={"statement_cache_size": 0},
+    )
+    try:
+        return await seed_corpus(engine)
+    finally:
+        await engine.dispose()
