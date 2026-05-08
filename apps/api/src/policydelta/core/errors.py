@@ -76,3 +76,79 @@ class ServiceUnavailableError(AppError):
     title = "Service Unavailable"
 
 
+def _problem_response(
+    *,
+    status_code: int,
+    title: str,
+    detail: str | None = None,
+    instance: str | None = None,
+    errors: list[FieldError] | None = None,
+) -> JSONResponse:
+    problem = ProblemDetail(
+        title=title,
+        status=status_code,
+        detail=detail,
+        instance=instance,
+        request_id=current_request_id(),
+        errors=errors,
+    )
+    return JSONResponse(
+        status_code=status_code,
+        content=problem.model_dump(exclude_none=True),
+        media_type=PROBLEM_CONTENT_TYPE,
+    )
+
+
+async def _handle_app_error(request: Request, exc: AppError) -> JSONResponse:
+    logger.warning(
+        "app_error", error_type=type(exc).__name__, status=exc.status_code, detail=exc.detail
+    )
+    return _problem_response(
+        status_code=exc.status_code,
+        title=exc.title,
+        detail=exc.detail,
+        instance=str(request.url.path),
+    )
+
+
+async def _handle_http_exception(request: Request, exc: StarletteHTTPException) -> JSONResponse:
+    return _problem_response(
+        status_code=exc.status_code,
+        title=str(exc.detail),
+        instance=str(request.url.path),
+    )
+
+
+async def _handle_validation_error(request: Request, exc: RequestValidationError) -> JSONResponse:
+    errors = [
+        FieldError(
+            loc=".".join(str(part) for part in err.get("loc", ())),
+            msg=str(err.get("msg", "invalid")),
+            type=str(err.get("type", "value_error")),
+        )
+        for err in exc.errors()
+    ]
+    return _problem_response(
+        status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+        title="Validation Error",
+        detail="Request failed validation.",
+        instance=str(request.url.path),
+        errors=errors,
+    )
+
+
+async def _handle_unexpected(request: Request, exc: Exception) -> JSONResponse:
+    # Full traceback to logs/Sentry with request id; generic message to the client.
+    logger.exception("unhandled_error", path=str(request.url.path))
+    return _problem_response(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        title="Internal Server Error",
+        instance=str(request.url.path),
+    )
+
+
+def register_exception_handlers(app: FastAPI) -> None:
+    app.add_exception_handler(AppError, _handle_app_error)  # type: ignore[arg-type]
+    app.add_exception_handler(StarletteHTTPException, _handle_http_exception)  # type: ignore[arg-type]
+    app.add_exception_handler(RequestValidationError, _handle_validation_error)  # type: ignore[arg-type]
+    app.add_exception_handler(Exception, _handle_unexpected)
