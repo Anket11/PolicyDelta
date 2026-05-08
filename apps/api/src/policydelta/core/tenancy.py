@@ -67,3 +67,45 @@ async def authenticate(
     if prefix is None:
         raise UnauthorizedError(_INVALID_KEY_MESSAGE)
 
+    row = (
+        await session.execute(select(ApiKey).where(col(ApiKey.prefix) == prefix))
+    ).scalar_one_or_none()
+    now = dt.datetime.now(dt.UTC)
+    if (
+        row is None
+        or row.id is None
+        or not verify_api_key(x_api_key, row.key_hash)
+        or row.revoked_at is not None
+        or (row.expires_at is not None and row.expires_at <= now)
+    ):
+        raise UnauthorizedError(_INVALID_KEY_MESSAGE)
+
+    await session.execute(update(ApiKey).where(col(ApiKey.id) == row.id).values(last_used_at=now))
+    structlog.contextvars.bind_contextvars(tenant_id=row.tenant_id)
+    return Principal(
+        tenant_id=row.tenant_id, api_key_id=row.id, scopes=effective_scopes(row.scopes)
+    )
+
+
+PrincipalDep = Annotated[Principal, Depends(authenticate)]
+
+
+async def tenant_session(principal: PrincipalDep, session: SessionDep) -> AsyncSession:
+    """The request session with RLS tenant context set (transaction-local)."""
+    await session.execute(
+        text("SELECT set_config('app.tenant_id', :tid, true)"),
+        {"tid": str(principal.tenant_id)},
+    )
+    return session
+
+
+TenantSessionDep = Annotated[AsyncSession, Depends(tenant_session)]
+
+
+def require_scope(scope: str) -> Callable[..., Coroutine[None, None, Principal]]:
+    async def _guard(principal: PrincipalDep) -> Principal:
+        if scope not in principal.scopes:
+            raise ForbiddenError(f"Requires scope: {scope}")
+        return principal
+
+    return _guard
