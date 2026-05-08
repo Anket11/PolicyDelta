@@ -75,3 +75,34 @@ def _parse_date(text: str) -> dt.date | None:
     return None
 
 
+def extract_metadata(markdown: str, *, published_date: dt.date) -> ExtractedMetadata:
+    supersedes = [
+        re.sub(r"\s+", " ", match.group("ref").strip())
+        for match in _SUPERSEDES_RE.finditer(markdown)
+    ]
+
+    for match in _EFFECTIVE_CONTEXT_RE.finditer(markdown):
+        parsed = _parse_date(match.group("rest"))
+        if parsed is not None:
+            evidence = match.group(0).strip()
+            # Anti-fabrication invariant: evidence must literally occur in source.
+            if evidence in markdown:
+                return ExtractedMetadata(
+                    effective_date=parsed,
+                    effective_date_source=EffectiveDateSource.EXTRACTED.value,
+                    effective_date_evidence=evidence,
+                    supersedes_refs=supersedes,
+                )
+
+    # "with immediate effect" or no commencement clause at all: anchor to
+    # publication, with provenance saying exactly that.
+    evidence_text = None
+    immediate = _IMMEDIATE_EFFECT_RE.search(markdown)
+    if immediate:
+        evidence_text = immediate.group(0)
+    return ExtractedMetadata(
+        effective_date=published_date,
+        effective_date_source=EffectiveDateSource.DEFAULTED_TO_PUBLISHED.value,
+        effective_date_evidence=evidence_text,
+        supersedes_refs=supersedes,
+    )
