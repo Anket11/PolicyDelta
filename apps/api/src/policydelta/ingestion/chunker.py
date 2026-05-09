@@ -148,3 +148,22 @@ def _structured_sections(lines: list[str], doc_title: str) -> tuple[list[tuple[s
     return sections, headings_found
 
 
+def _fallback_windows(text: str, doc_title: str) -> list[tuple[str, str]]:
+    sections: list[tuple[str, str]] = []
+    start = 0
+    while start < len(text):
+        window = text[start : start + FALLBACK_WINDOW_CHARS]
+        sections.append((doc_title, window))
+        start += FALLBACK_WINDOW_CHARS - FALLBACK_OVERLAP_CHARS
+    return sections
+
+
+def chunk_document(markdown: str, *, doc_title: str) -> ChunkingResult:
+    lines = markdown.splitlines()
+    sections, headings_found = _structured_sections(lines, doc_title)
+
+    if headings_found < MIN_HEADINGS_FOR_STRUCTURE:
+        return ChunkingResult(
+            chunks=_emit(_fallback_windows(markdown, doc_title)), used_fallback=True
+        )
+    return ChunkingResult(chunks=_emit(sections), used_fallback=False)
