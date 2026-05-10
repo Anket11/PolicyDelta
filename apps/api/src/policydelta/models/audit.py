@@ -78,3 +78,34 @@ class AuditRun(SQLModel, table=True):
     )
     error: str | None = None
     created_at: dt.datetime | None = created_at_field()
+    updated_at: dt.datetime | None = updated_at_field()
+    finished_at: dt.datetime | None = tztimestamp_field()
+
+
+class AuditFinding(SQLModel, table=True):
+    __tablename__ = "audit_findings"
+    __table_args__ = (
+        CheckConstraint("risk_level IN ('HIGH', 'MEDIUM', 'LOW')", name="risk_level_valid"),
+    )
+
+    id: int | None = bigint_pk()
+    tenant_id: int = Field(foreign_key="organizations.id", index=True, sa_type=BigInteger)
+    run_id: int = Field(foreign_key="audit_runs.id", index=True, sa_type=BigInteger)
+    clause_index: int
+    offending_policy_text: str
+    legal_rule_text: str  # chunk content FROM THE DB — never LLM-authored
+    citation: str  # from the DB
+    source_chunk_id: int | None = Field(
+        default=None, foreign_key="regulatory_chunks.id", sa_type=BigInteger
+    )
+    source_document_id: int | None = Field(
+        default=None, foreign_key="regulatory_documents.id", sa_type=BigInteger
+    )
+    source_url: str  # from the DB
+    risk_level: str = Field(max_length=8)
+    grounding_quote: str  # verified verbatim span
+    rationale: str
+    suggested_fix: str
+    confidence: float
+    needs_review: bool = Field(default=False)  # weak retrieval or low confidence
+    created_at: dt.datetime | None = created_at_field()
