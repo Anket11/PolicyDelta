@@ -77,3 +77,55 @@ class OpenAIEmbeddings:
 class OpenAIChat:
     """Strict Structured Outputs chat — deterministic (temperature 0)."""
 
+    def __init__(self, api_key: str, model: str, client: AsyncOpenAI | None = None) -> None:
+        self.model = model
+        self._client = client or AsyncOpenAI(api_key=api_key, timeout=_REQUEST_TIMEOUT_SECONDS)
+
+    async def complete_structured[T: BaseModel](
+        self, *, system: str, user: str, response_model: type[T]
+    ) -> tuple[T, TokenUsage]:
+        try:
+            result = await self._complete(system=system, user=user, response_model=response_model)
+        except Exception:
+            chat_health.record_failure()  # one strike per fully-exhausted call
+            raise
+        chat_health.record_success()
+        return result
+
+    @retry(
+        retry=retry_if_exception_type(_RETRYABLE),
+        stop=stop_after_attempt(3),
+        wait=wait_exponential_jitter(initial=1, max=8),
+        reraise=True,
+    )
+    async def _complete[T: BaseModel](
+        self, *, system: str, user: str, response_model: type[T]
+    ) -> tuple[T, TokenUsage]:
+        started = time.perf_counter()
+        completion = await self._client.chat.completions.parse(
+            model=self.model,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            response_format=response_model,
+            temperature=0,
+        )
+        latency_ms = round((time.perf_counter() - started) * 1000)
+        usage = TokenUsage(
+            prompt_tokens=completion.usage.prompt_tokens if completion.usage else 0,
+            completion_tokens=completion.usage.completion_tokens if completion.usage else 0,
+        )
+        logger.info(
+            "openai_call",
+            operation="chat",
+            model=self.model,
+            prompt_tokens=usage.prompt_tokens,
+            completion_tokens=usage.completion_tokens,
+            cost_usd=chat_cost_usd(self.model, usage.prompt_tokens, usage.completion_tokens),
+            latency_ms=latency_ms,
+        )
+        parsed = completion.choices[0].message.parsed
+        if parsed is None:  # refusal or schema failure — never silently compliant
+            raise ProviderError("Model returned no parsed structured output")
+        return parsed, usage
