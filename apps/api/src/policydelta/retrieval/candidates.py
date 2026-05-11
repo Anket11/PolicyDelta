@@ -73,3 +73,48 @@ async def vector_search(
     return [Candidate(chunk=best.chunk, distance=best.distance, weak_match=True, source="vector")]
 
 
+async def citation_lookup(
+    session: AsyncSession, query_text: str, *, jurisdiction: str, as_of: dt.date
+) -> list[Candidate]:
+    citations = extract_citations(query_text)
+    if not citations:
+        return []
+    stmt = in_force_chunks(jurisdiction, as_of)
+    filters = [col(RegulatoryChunk.legal_citation).ilike(f"%{cite}%") for cite in citations]
+    rows = (await session.execute(stmt.where(or_(*filters)))).scalars().all()
+    return [
+        Candidate(chunk=chunk, distance=None, weak_match=False, source="citation") for chunk in rows
+    ]
+
+
+def merge_candidates(
+    vector_hits: list[Candidate], citation_hits: list[Candidate], *, top_k: int
+) -> list[Candidate]:
+    """Citation-exact evidence wins: a chunk found by both paths surfaces as a
+    citation hit (never weak), keeping its vector distance for scoring."""
+    distance_by_id = {
+        candidate.chunk.id: candidate.distance
+        for candidate in vector_hits
+        if candidate.chunk.id is not None
+    }
+    merged: list[Candidate] = []
+    seen: set[int] = set()
+    for candidate in citation_hits:
+        if candidate.chunk.id is None or candidate.chunk.id in seen:
+            continue
+        seen.add(candidate.chunk.id)
+        merged.append(
+            Candidate(
+                chunk=candidate.chunk,
+                distance=distance_by_id.get(candidate.chunk.id),
+                weak_match=False,
+                source="citation",
+            )
+        )
+    promoted_count = len(merged)
+    for candidate in vector_hits:
+        if candidate.chunk.id is None or candidate.chunk.id in seen:
+            continue
+        seen.add(candidate.chunk.id)
+        merged.append(candidate)
+    return merged[: top_k + promoted_count]
