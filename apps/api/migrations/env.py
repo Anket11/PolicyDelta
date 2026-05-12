@@ -77,3 +77,16 @@ def _run_migrations(connection: Connection) -> None:
         context.run_migrations()
 
 
+async def run_migrations_online() -> None:
+    engine = create_async_engine(_database_url(), connect_args={"statement_cache_size": 0})
+    try:
+        async with engine.connect() as connection:
+            await connection.run_sync(_run_migrations)
+    finally:
+        await engine.dispose()
+
+
+if context.is_offline_mode():
+    run_migrations_offline()
+else:
+    asyncio.run(run_migrations_online())
