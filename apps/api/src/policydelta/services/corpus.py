@@ -78,3 +78,17 @@ async def list_chunks(
     if await get_document(session, document_id) is None:
         return None  # unconfirmed or absent — identical 404, no existence leak
 
+    base = select(RegulatoryChunk).where(col(RegulatoryChunk.document_id) == document_id)
+    total = (await session.execute(select(func.count()).select_from(base.subquery()))).scalar_one()
+    rows = (
+        (
+            await session.execute(
+                base.order_by(col(RegulatoryChunk.chunk_index))
+                .limit(page.limit)
+                .offset(page.offset)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return list(rows), int(total)
