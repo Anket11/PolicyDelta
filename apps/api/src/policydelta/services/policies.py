@@ -76,3 +76,50 @@ async def update_policy(
         return None
     policy, current = found
 
+    if title is not None:
+        policy.title = title
+    if body is not None and body != current.body:
+        next_no = policy.current_version_no + 1
+        current = OrgPolicyVersion(
+            tenant_id=policy.tenant_id,
+            policy_id=policy_id,
+            version_no=next_no,
+            body=body,
+        )
+        session.add(current)
+        policy.current_version_no = next_no
+    session.add(policy)
+    await session.flush()
+    return policy, current
+
+
+async def soft_delete_policy(session: AsyncSession, policy_id: int) -> bool:
+    found = await get_policy(session, policy_id)
+    if found is None:
+        return False
+    policy, _ = found
+    policy.deleted_at = dt.datetime.now(dt.UTC)
+    session.add(policy)
+    await session.flush()
+    return True
+
+
+async def list_versions(
+    session: AsyncSession, policy_id: int, page: PageParams
+) -> tuple[list[OrgPolicyVersion], int] | None:
+    if await get_policy(session, policy_id) is None:
+        return None
+    base = select(OrgPolicyVersion).where(col(OrgPolicyVersion.policy_id) == policy_id)
+    total = (await session.execute(select(func.count()).select_from(base.subquery()))).scalar_one()
+    rows = (
+        (
+            await session.execute(
+                base.order_by(col(OrgPolicyVersion.version_no).desc())
+                .limit(page.limit)
+                .offset(page.offset)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return list(rows), int(total)
