@@ -230,3 +230,29 @@ class Worker:
             processed += 1
         return processed
 
+    async def reap(self) -> int:
+        """Recover jobs orphaned by a crashed worker (expired lease)."""
+        async with self._maker() as session:
+            rows = (
+                await session.execute(_REAP_SQL, {"lease_seconds": LEASE_TIMEOUT.total_seconds()})
+            ).fetchall()
+            await session.commit()
+        if rows:
+            logger.warning("jobs_reaped", count=len(rows), job_ids=[row[0] for row in rows])
+        return len(rows)
+
+    async def run_forever(self, stop: asyncio.Event) -> None:
+        await self.reap()  # startup recovery
+        last_reap = dt.datetime.now(dt.UTC)
+        while not stop.is_set():
+            try:
+                worked = await self.process_one()
+            except Exception:
+                logger.exception("worker_loop_error")
+                worked = False
+            if dt.datetime.now(dt.UTC) - last_reap > dt.timedelta(minutes=5):
+                await self.reap()
+                last_reap = dt.datetime.now(dt.UTC)
+            if not worked:
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(stop.wait(), timeout=self.poll_seconds)
