@@ -152,3 +152,18 @@ def upgrade() -> None:
             name="ck_supersessions_relation_valid",
         ),
     )
+    op.create_index(
+        "ix_supersessions_superseded_chunk_id", "supersessions", ["superseded_chunk_id"]
+    )
+
+    # Grants: corpus is read-only to the API role; the worker ingests.
+    op.execute("GRANT SELECT ON regulatory_documents, regulatory_chunks, supersessions TO cg_app;")
+    op.execute("GRANT SELECT, INSERT, UPDATE ON regulatory_documents TO cg_worker;")
+    op.execute("GRANT SELECT, INSERT, UPDATE ON regulatory_chunks TO cg_worker;")
+    op.execute("GRANT SELECT, INSERT ON supersessions TO cg_worker;")
+
+
+def downgrade() -> None:
+    op.drop_table("supersessions")
+    op.drop_table("regulatory_chunks")
+    op.drop_table("regulatory_documents")
