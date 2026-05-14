@@ -74,3 +74,25 @@ export const DashboardContent = () => {
           </Button>
         </div>
 
+        {runs.length === 0 ? (
+          <EmptyState
+            icon={Stamp}
+            title="No audits yet"
+            description="Run your first audit to see how your policies hold up against the law in force."
+            action={
+              <Button asChild>
+                <Link href="/audits">Run an audit</Link>
+              </Button>
+            }
+          />
+        ) : (
+          <ol className="divide-y divide-border rounded-lg border border-border bg-card shadow-sheet">
+            {runs.slice(0, 6).map((run) => (
+              <AuditRow key={run.id} run={run} />
+            ))}
+          </ol>
+        )}
+      </section>
+    </div>
+  );
+};
