@@ -147,3 +147,25 @@ def upgrade() -> None:
     op.create_index("ix_audit_findings_tenant_id", "audit_findings", ["tenant_id"])
     op.create_index("ix_audit_findings_run_id", "audit_findings", ["run_id"])
 
+    for table in ("audit_runs", "audit_findings"):
+        op.execute(f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY;")
+        op.execute(f"ALTER TABLE {table} FORCE ROW LEVEL SECURITY;")
+        op.execute(
+            f"""
+            CREATE POLICY tenant_isolation ON {table}
+                FOR ALL TO cg_app, cg_worker
+                USING (tenant_id = app_current_tenant())
+                WITH CHECK (tenant_id = app_current_tenant());
+            """
+        )
+
+    op.execute("GRANT SELECT, INSERT ON audit_runs TO cg_app;")
+    op.execute("GRANT SELECT ON audit_findings TO cg_app;")
+    op.execute("GRANT SELECT, INSERT, UPDATE ON audit_runs TO cg_worker;")
+    op.execute("GRANT SELECT, INSERT ON audit_findings TO cg_worker;")
+
+
+def downgrade() -> None:
+    op.execute("DROP TRIGGER IF EXISTS trg_audit_runs_updated_at ON audit_runs;")
+    op.drop_table("audit_findings")
+    op.drop_table("audit_runs")
