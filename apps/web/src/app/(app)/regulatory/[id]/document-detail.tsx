@@ -78,3 +78,27 @@ export const DocumentDetailView = ({ documentId }: { documentId: number }) => {
                   {chunk.content}
                 </p>
                 <div className="mt-3 border-t border-border pt-2">
+                  <ChunkValidity
+                    effective={chunk.effective_date}
+                    expiration={chunk.expiration_date}
+                    source={chunk.effective_date_source}
+                  />
+                </div>
+              </li>
+            ))}
+          </ol>
+        )}
+      </section>
+    </div>
+  );
+};
+
+const BackLink = () => (
+  <Link
+    href="/regulatory"
+    className="inline-flex items-center gap-1.5 text-sm text-muted-foreground transition-colors duration-200 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+  >
+    <ArrowLeft className="h-4 w-4" aria-hidden />
+    Regulatory explorer
+  </Link>
+);
