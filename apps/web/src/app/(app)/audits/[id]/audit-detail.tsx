@@ -137,3 +137,43 @@ export const AuditDetail = ({ runId }: { runId: number }) => {
             Findings{findings.data ? ` (${findings.data.total})` : ""}
           </h2>
 
+          {findings.isPending ? (
+            <Skeleton className="h-48 rounded-lg" />
+          ) : findings.isError ? (
+            <ErrorState error={findings.error} onRetry={() => findings.refetch()} />
+          ) : findings.data.items.length === 0 ? (
+            run.verdict === "COMPLIANT" ? (
+              <EmptyState
+                icon={ShieldCheck}
+                title="No violations found"
+                description="Every evaluated clause held up against the law in force on the anchor date."
+              />
+            ) : (
+              <EmptyState
+                icon={FileSearch}
+                title="No governing law retrieved"
+                description="The corpus contains no confirmed regulation covering these clauses for this jurisdiction and date. That is reported honestly — never as compliance."
+              />
+            )
+          ) : (
+            <ol className="space-y-4">
+              {findings.data.items.map((finding, index) => (
+                <FindingCard key={finding.id} finding={finding} ordinal={index + 1} />
+              ))}
+            </ol>
+          )}
+        </section>
+      ) : null}
+    </div>
+  );
+};
+
+const BackLink = () => (
+  <Link
+    href="/audits"
+    className="inline-flex items-center gap-1.5 text-sm text-muted-foreground transition-colors duration-200 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+  >
+    <ArrowLeft className="h-4 w-4" aria-hidden />
+    Audit ledger
+  </Link>
+);
