@@ -78,3 +78,5 @@ export const PoliciesContent = () => {
         </>
       )}
     </div>
+  );
+};
