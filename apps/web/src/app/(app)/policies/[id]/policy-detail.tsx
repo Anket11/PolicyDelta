@@ -148,3 +148,109 @@ const PolicyEditor = ({ policy }: { policy: PolicyOut }) => {
   const [body, setBody] = useState(policy.body);
   const dirty = title !== policy.title || body !== policy.body;
 
+  const onSave = (): void => {
+    updatePolicy.mutate(
+      {
+        ...(title !== policy.title ? { title } : {}),
+        ...(body !== policy.body ? { body } : {}),
+      },
+      {
+        onSuccess: (updated) => {
+          toast.success(
+            updated.current_version_no > policy.current_version_no
+              ? `Saved as version ${updated.current_version_no}`
+              : "Saved",
+          );
+        },
+        onError: (error) =>
+          toast.error("Could not save", {
+            description: error instanceof ApiError ? error.message : "Unexpected error.",
+          }),
+      },
+    );
+  };
+
+  return (
+    <div className="space-y-4">
+      <div className="space-y-2">
+        <Label htmlFor="policy-title">Title</Label>
+        <Input
+          id="policy-title"
+          value={title}
+          onChange={(event) => setTitle(event.target.value)}
+          className="max-w-xl bg-card"
+        />
+      </div>
+      <div className="space-y-2">
+        <Label htmlFor="policy-body">Body</Label>
+        <Textarea
+          id="policy-body"
+          value={body}
+          onChange={(event) => setBody(event.target.value)}
+          rows={14}
+          className="resize-y bg-card text-sm leading-relaxed"
+        />
+        <p className="text-xs text-muted-foreground">
+          Changing the body appends an immutable new version — past audits keep
+          pointing at the exact text they judged.
+        </p>
+      </div>
+      <Button onClick={onSave} disabled={!dirty || updatePolicy.isPending} className="gap-2">
+        {updatePolicy.isPending ? (
+          <>
+            <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> Saving…
+          </>
+        ) : (
+          <>
+            <Save className="h-4 w-4" aria-hidden /> Save changes
+          </>
+        )}
+      </Button>
+    </div>
+  );
+};
+
+const DeleteButton = ({
+  onConfirm,
+  pending,
+}: {
+  onConfirm: () => void;
+  pending: boolean;
+}) => (
+  <AlertDialog>
+    <AlertDialogTrigger asChild>
+      <Button variant="outline" className="gap-2 text-destructive hover:bg-peach-900/60">
+        <Trash2 className="h-4 w-4" aria-hidden /> Retire
+      </Button>
+    </AlertDialogTrigger>
+    <AlertDialogContent>
+      <AlertDialogHeader>
+        <AlertDialogTitle>Retire this policy?</AlertDialogTitle>
+        <AlertDialogDescription>
+          The policy disappears from lists and new audits. Past audit runs keep
+          their snapshots — nothing already judged is lost.
+        </AlertDialogDescription>
+      </AlertDialogHeader>
+      <AlertDialogFooter>
+        <AlertDialogCancel>Keep it</AlertDialogCancel>
+        <AlertDialogAction
+          onClick={onConfirm}
+          disabled={pending}
+          className="bg-destructive text-destructive-foreground hover:bg-peach-300"
+        >
+          Retire policy
+        </AlertDialogAction>
+      </AlertDialogFooter>
+    </AlertDialogContent>
+  </AlertDialog>
+);
+
+const BackLink = () => (
+  <Link
+    href="/policies"
+    className="inline-flex items-center gap-1.5 text-sm text-muted-foreground transition-colors duration-200 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+  >
+    <ArrowLeft className="h-4 w-4" aria-hidden />
+    Policies
+  </Link>
+);
