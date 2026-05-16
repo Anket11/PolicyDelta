@@ -75,3 +75,10 @@ async function proxy(
   const requestId = upstream.headers.get("x-request-id");
   if (requestId) responseHeaders.set("x-request-id", requestId);
 
+  return new NextResponse(upstream.body, {
+    status: upstream.status,
+    headers: responseHeaders,
+  });
+}
+
+export { proxy as GET, proxy as POST, proxy as PATCH, proxy as DELETE };
