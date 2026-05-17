@@ -218,3 +218,78 @@ export const NewAuditDialog = () => {
               />
             )}
 
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+              <FormField
+                control={form.control}
+                name="jurisdiction"
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>Jurisdiction</FormLabel>
+                    <FormControl>
+                      <Input {...field} placeholder="PK" className="uppercase" />
+                    </FormControl>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+
+              <FormField
+                control={form.control}
+                name="asOfDate"
+                render={({ field }) => (
+                  <FormItem className="flex flex-col">
+                    <FormLabel>As-of date</FormLabel>
+                    <Popover>
+                      <PopoverTrigger asChild>
+                        <FormControl>
+                          <Button
+                            variant="outline"
+                            className={cn(
+                              "justify-start gap-2 text-left font-normal",
+                              !field.value && "text-muted-foreground",
+                            )}
+                          >
+                            <CalendarDays className="h-4 w-4" aria-hidden />
+                            {field.value ? format(field.value, "d MMM yyyy") : "Pick a date"}
+                          </Button>
+                        </FormControl>
+                      </PopoverTrigger>
+                      <PopoverContent className="w-auto p-0" align="start">
+                        <Calendar
+                          mode="single"
+                          selected={field.value}
+                          onSelect={(date) => date && field.onChange(date)}
+                          autoFocus
+                        />
+                      </PopoverContent>
+                    </Popover>
+                    <FormDescription>Point-in-time audits welcome.</FormDescription>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+            </div>
+
+            <Button
+              type="submit"
+              disabled={createAudit.isPending}
+              className="h-11 w-full gap-2"
+            >
+              {createAudit.isPending ? (
+                <>
+                  <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
+                  Queueing audit…
+                </>
+              ) : (
+                <>
+                  <Stamp className="h-4 w-4" aria-hidden />
+                  Run audit
+                </>
+              )}
+            </Button>
+          </form>
+        </Form>
+      </DialogContent>
+    </Dialog>
+  );
+};
