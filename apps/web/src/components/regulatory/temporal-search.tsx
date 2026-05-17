@@ -152,3 +152,13 @@ export const TemporalSearch = () => {
         )
       ) : null}
 
+      {search.isIdle ? (
+        <EmptyState
+          icon={SearchCheck}
+          title="Ask the corpus a question"
+          description="Same query, different as-of date, different law — try it around an amendment boundary."
+        />
+      ) : null}
+    </div>
+  );
+};
