@@ -74,3 +74,112 @@ export const useFindings = (
     enabled,
   });
 
+export const useCreateAudit = () => {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (body: AuditCreate) =>
+      apiFetch<AuditRunOut>("audits", {
+        method: "POST",
+        body: JSON.stringify(body),
+      }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["audits"] }),
+  });
+};
+
+export const usePolicies = (offset = 0): UseQueryResult<Page<PolicySummary>> =>
+  useQuery({
+    queryKey: queryKeys.policies(offset),
+    queryFn: () =>
+      apiFetch<Page<PolicySummary>>(`policies${pageQuery(DEFAULT_PAGE_SIZE, offset)}`),
+  });
+
+export const usePolicy = (id: number): UseQueryResult<PolicyOut> =>
+  useQuery({
+    queryKey: queryKeys.policy(id),
+    queryFn: () => apiFetch<PolicyOut>(`policies/${id}`),
+  });
+
+export const usePolicyVersions = (id: number): UseQueryResult<Page<PolicyVersionOut>> =>
+  useQuery({
+    queryKey: queryKeys.policyVersions(id),
+    queryFn: () => apiFetch<Page<PolicyVersionOut>>(`policies/${id}/versions?limit=50`),
+  });
+
+export const useCreatePolicy = () => {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (body: { title: string; body: string }) =>
+      apiFetch<PolicyOut>("policies", { method: "POST", body: JSON.stringify(body) }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["policies"] }),
+  });
+};
+
+export const useUpdatePolicy = (id: number) => {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (body: { title?: string; body?: string }) =>
+      apiFetch<PolicyOut>(`policies/${id}`, {
+        method: "PATCH",
+        body: JSON.stringify(body),
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.policy(id) });
+      queryClient.invalidateQueries({ queryKey: ["policies"] });
+      queryClient.invalidateQueries({ queryKey: queryKeys.policyVersions(id) });
+    },
+  });
+};
+
+export const useDeletePolicy = () => {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (id: number) => apiFetch<void>(`policies/${id}`, { method: "DELETE" }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["policies"] }),
+  });
+};
+
+export interface DocumentFilters {
+  jurisdiction?: string;
+  issuing_body?: string;
+  document_type?: string;
+}
+
+export const useDocuments = (
+  offset = 0,
+  filters: DocumentFilters = {},
+): UseQueryResult<Page<DocumentSummary>> => {
+  const params = new URLSearchParams({
+    limit: String(DEFAULT_PAGE_SIZE),
+    offset: String(offset),
+  });
+  for (const [key, value] of Object.entries(filters)) {
+    if (value) params.set(key, value);
+  }
+  return useQuery({
+    queryKey: queryKeys.documents(offset, params.toString()),
+    queryFn: () =>
+      apiFetch<Page<DocumentSummary>>(`regulatory/documents?${params.toString()}`),
+  });
+};
+
+export const useDocument = (id: number): UseQueryResult<DocumentDetail> =>
+  useQuery({
+    queryKey: queryKeys.document(id),
+    queryFn: () => apiFetch<DocumentDetail>(`regulatory/documents/${id}`),
+  });
+
+export const useChunks = (documentId: number): UseQueryResult<Page<ChunkOut>> =>
+  useQuery({
+    queryKey: queryKeys.chunks(documentId),
+    queryFn: () =>
+      apiFetch<Page<ChunkOut>>(`regulatory/documents/${documentId}/chunks?limit=100`),
+  });
+
+export const useRegulatorySearch = () =>
+  useMutation({
+    mutationFn: (body: RegulatorySearchRequest) =>
+      apiFetch<RegulatorySearchResponse>("regulatory/search", {
+        method: "POST",
+        body: JSON.stringify(body),
+      }),
+  });
