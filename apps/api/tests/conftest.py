@@ -156,3 +156,40 @@ def api_app(app_engine: "AsyncEngine") -> FastAPI:
                 await session.rollback()
                 raise
 
+    application.dependency_overrides[get_session] = override_session
+    application.dependency_overrides[get_embedding_provider] = FakeEmbeddings
+    return application
+
+
+@pytest.fixture
+async def api(api_app: FastAPI) -> AsyncIterator[AsyncClient]:
+    transport = ASGITransport(app=api_app, raise_app_exceptions=False)
+    async with AsyncClient(transport=transport, base_url="http://test") as http_client:
+        yield http_client
+
+
+async def issue_key(
+    owner_engine: "AsyncEngine", org_id: int, scopes: list[str], *, revoked: bool = False
+) -> str:
+    """Insert an API key for a test org; returns the full plaintext key."""
+    from sqlalchemy import text
+
+    from policydelta.core.security import generate_api_key
+
+    generated = generate_api_key("local")  # default pepper — same one the app verifies with
+    async with owner_engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO api_keys (tenant_id, prefix, key_hash, name, scopes, revoked_at) "
+                "VALUES (:tid, :prefix, :hash, 'test', :scopes, "
+                "CASE WHEN :revoked THEN now() ELSE NULL END)"
+            ),
+            {
+                "tid": org_id,
+                "prefix": generated.prefix,
+                "hash": generated.key_hash,
+                "scopes": scopes,
+                "revoked": revoked,
+            },
+        )
+    return generated.full_key
