@@ -155,3 +155,41 @@ class TestRetrievalQuality:
         assert mrr >= MRR_GATE, f"MRR={mrr:.2f} below {MRR_GATE}"
 
 
+class TestAuditQuality:
+    async def test_verdict_accuracy_and_grounding(
+        self, seeded_corpus: None, app_engine: AsyncEngine
+    ) -> None:
+        embedder, chat = _providers()
+        correct = 0
+        total_dropped = 0
+
+        async with AsyncSession(app_engine) as session:
+            for case in AUDIT_GOLDEN:
+                result = await run_audit_pipeline(
+                    session,
+                    embedder,
+                    chat,
+                    policy_text=case.policy_text,
+                    jurisdiction="PK",
+                    as_of=case.as_of,
+                )
+                verdict = result.verdict.value if result.verdict else "NONE"
+                if verdict == case.expected_verdict:
+                    correct += 1
+                total_dropped += sum(o.dropped_ungrounded for o in result.outcomes)
+                logger.info(
+                    "eval_audit_case",
+                    case=case.case_id,
+                    expected=case.expected_verdict,
+                    actual=verdict,
+                )
+
+        accuracy = correct / len(AUDIT_GOLDEN)
+        logger.info(
+            "eval_audit_summary",
+            verdict_accuracy=accuracy,
+            grounding_drops=total_dropped,  # the hallucination canary
+        )
+        assert accuracy >= VERDICT_ACCURACY_GATE, (
+            f"verdict accuracy {accuracy:.2f} below {VERDICT_ACCURACY_GATE}"
+        )
