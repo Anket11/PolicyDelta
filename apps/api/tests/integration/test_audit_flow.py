@@ -153,3 +153,144 @@ class TestHonestVerdicts:
         run = await _post_audit(api, audit_key, as_of="2026-06-06", jurisdiction="EU")
         await make_worker(worker_engine).drain()
 
+        finished = await _get_run(api, audit_key, run["id"])
+        assert finished["verdict"] == "INSUFFICIENT_EVIDENCE"
+        assert finished["coverage"]["insufficient_evidence"] >= 1
+
+    async def test_unknown_jurisdiction_rejected_upfront(
+        self, seeded_corpus: None, api: AsyncClient, audit_key: str
+    ) -> None:
+        response = await api.post(
+            "/api/v1/audits",
+            json={"policy_text": "x", "jurisdiction": "XX", "as_of_date": "2026-06-06"},
+            headers={"X-API-Key": audit_key},
+        )
+        assert response.status_code == 422
+
+    async def test_fabricated_quote_is_dropped_by_grounding_gate(
+        self,
+        seeded_corpus: None,
+        api: AsyncClient,
+        audit_key: str,
+        worker_engine: AsyncEngine,
+    ) -> None:
+        def fabricating_script(payload: dict[str, Any]) -> ClauseVerdict:
+            return ClauseVerdict(
+                verdict=Verdict.VIOLATION,
+                findings=[
+                    ClauseFinding(
+                        ref_id=payload["excerpts"][0]["ref_id"],
+                        grounding_quote="funds must be settled instantly upon receipt",
+                        risk_level=RiskLevel.HIGH,
+                        rationale="fabricated",
+                        suggested_fix="n/a",
+                    )
+                ],
+                confidence=0.99,
+            )
+
+        run = await _post_audit(api, audit_key, as_of="2026-06-06")
+        await make_worker(worker_engine, FakeChat(script=fabricating_script)).drain()
+
+        finished = await _get_run(api, audit_key, run["id"])
+        # Every claimed violation failed grounding ⇒ downgraded, zero findings.
+        assert finished["verdict"] == "INSUFFICIENT_EVIDENCE"
+        findings = (
+            await api.get(f"/api/v1/audits/{run['id']}/findings", headers={"X-API-Key": audit_key})
+        ).json()
+        assert findings["total"] == 0
+
+    async def test_clause_llm_failure_yields_partial_never_compliant(
+        self,
+        seeded_corpus: None,
+        api: AsyncClient,
+        audit_key: str,
+        worker_engine: AsyncEngine,
+    ) -> None:
+        def exploding_script(payload: dict[str, Any]) -> ClauseVerdict:
+            msg = "simulated provider outage"
+            raise RuntimeError(msg)
+
+        run = await _post_audit(
+            api, audit_key, as_of="2026-06-06", policy_text="Single clause about settlements."
+        )
+        await make_worker(worker_engine, FakeChat(script=exploding_script)).drain()
+
+        finished = await _get_run(api, audit_key, run["id"])
+        assert finished["status"] == "partial"
+        assert finished["verdict"] is None
+        assert finished["coverage"]["error"] == 1
+
+
+class TestJobMachinery:
+    async def test_total_pipeline_failure_exhausts_retries_then_fails_run(
+        self,
+        seeded_corpus: None,
+        api: AsyncClient,
+        audit_key: str,
+        worker_engine: AsyncEngine,
+    ) -> None:
+        class FailingEmbedder:
+            model = "failing"
+            dims = 1536
+
+            async def embed(self, texts: list[str]) -> list[list[float]]:
+                msg = "embeddings hard down"
+                raise RuntimeError(msg)
+
+        run = await _post_audit(api, audit_key, as_of="2026-06-06")
+        worker = Worker(worker_engine, FailingEmbedder(), FakeChat(), name="test-worker")
+        await worker.drain()  # claims, fails, requeues, reclaims… until attempts exhausted
+
+        finished = await _get_run(api, audit_key, run["id"])
+        assert finished["status"] == "failed"
+        assert finished["error"] == "job retries exhausted"
+
+    async def test_reaper_requeues_expired_lease(
+        self, owner_engine: AsyncEngine, worker_engine: AsyncEngine, two_orgs: tuple[int, int]
+    ) -> None:
+        async with owner_engine.begin() as conn:
+            job_id = (
+                await conn.execute(
+                    text(
+                        "INSERT INTO jobs (kind, status, attempts, max_attempts, locked_at, "
+                        "locked_by) VALUES ('audit', 'running', 1, 3, now() - interval "
+                        "'20 minutes', 'dead-worker') RETURNING id"
+                    )
+                )
+            ).scalar_one()
+
+        reaped = await make_worker(worker_engine).reap()
+        assert reaped == 1
+
+        async with owner_engine.begin() as conn:
+            status = (
+                await conn.execute(text("SELECT status FROM jobs WHERE id = :id"), {"id": job_id})
+            ).scalar_one()
+            await conn.execute(text("DELETE FROM jobs WHERE id = :id"), {"id": job_id})
+        assert status == "queued"
+
+    async def test_reaper_fails_job_with_exhausted_attempts(
+        self, owner_engine: AsyncEngine, worker_engine: AsyncEngine, two_orgs: tuple[int, int]
+    ) -> None:
+        async with owner_engine.begin() as conn:
+            job_id = (
+                await conn.execute(
+                    text(
+                        "INSERT INTO jobs (kind, status, attempts, max_attempts, locked_at, "
+                        "locked_by) VALUES ('audit', 'running', 3, 3, now() - interval "
+                        "'20 minutes', 'dead-worker') RETURNING id"
+                    )
+                )
+            ).scalar_one()
+
+        await make_worker(worker_engine).reap()
+
+        async with owner_engine.begin() as conn:
+            status = (
+                await conn.execute(text("SELECT status FROM jobs WHERE id = :id"), {"id": job_id})
+            ).scalar_one()
+            await conn.execute(text("DELETE FROM jobs WHERE id = :id"), {"id": job_id})
+        assert status == "failed"
+
+
