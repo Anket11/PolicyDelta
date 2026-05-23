@@ -137,3 +137,135 @@ class TestHappyPath:
         assert not any("fourteen (14) business days" in text_ for text_ in in_force)
 
 
+class TestQuarantineGates:
+    @pytest.mark.parametrize(
+        ("case_id", "markdown", "expected_reason", "marker"),
+        [
+            ("unstructured", UNSTRUCTURED_NOTICE, "no_structure", "wishes to remind"),
+            ("urdu", URDU_PRIMARY, "non_english", "سرکلر"),
+            (
+                "injection",
+                INJECTION_GAZETTE,
+                "injection_flag",
+                "Ignore previous instructions",
+            ),
+        ],
+        ids=["unstructured", "urdu", "injection"],
+    )
+    async def test_suspect_documents_are_quarantined_not_retrievable(
+        self,
+        ingest_session: AsyncSession,
+        app_engine: AsyncEngine,
+        case_id: str,
+        markdown: str,
+        expected_reason: str,
+        marker: str,
+    ) -> None:
+        async with ingest_session as session:
+            outcome = await ingest_markdown(
+                session, FakeEmbeddings(), markdown=markdown, hints=_hints()
+            )
+        assert outcome.status == "review"
+        assert outcome.review_reason == expected_reason
+        # The review gate in THE canonical predicate keeps it out of retrieval:
+        in_force = await _in_force_texts(app_engine, dt.date(2027, 1, 1))
+        assert not any(marker in text_ for text_ in in_force)
+
+
+class TestPdfPath:
+    async def test_text_pdf_extracts_and_confirms(self, ingest_session: AsyncSession) -> None:
+        import pymupdf
+
+        pdf = pymupdf.open()
+        page = pdf.new_page()
+        page.insert_text((72, 72), STRUCTURED_GAZETTE, fontsize=9)
+        pdf_bytes = pdf.tobytes()
+        pdf.close()
+
+        async with ingest_session as session:
+            outcome = await ingest_bytes(
+                session, FakeEmbeddings(), content=pdf_bytes, hints=_hints()
+            )
+        assert outcome.status in {"confirmed", "review"}  # extraction fidelity varies
+        assert outcome.chunk_count >= 1
+
+    async def test_imageless_blank_pdf_is_rejected_as_scanned(
+        self, ingest_session: AsyncSession
+    ) -> None:
+        import pymupdf
+
+        pdf = pymupdf.open()
+        pdf.new_page()  # zero extractable text
+        pdf_bytes = pdf.tobytes()
+        pdf.close()
+
+        async with ingest_session as session:
+            outcome = await ingest_bytes(
+                session, FakeEmbeddings(), content=pdf_bytes, hints=_hints()
+            )
+        assert outcome.status == "review"
+        assert outcome.review_reason == "scanned_pdf"
+        assert outcome.chunk_count == 0
+
+
+class TestResumability:
+    async def test_backfill_completes_interrupted_embedding(
+        self, ingest_session: AsyncSession, owner_engine: AsyncEngine, worker_engine: AsyncEngine
+    ) -> None:
+        hints = _hints()
+        async with ingest_session as session:
+            outcome = await ingest_markdown(
+                session, FakeEmbeddings(), markdown=STRUCTURED_GAZETTE, hints=hints
+            )
+        # Simulate a crash mid-embedding: wipe the vectors.
+        async with owner_engine.begin() as conn:
+            await conn.execute(
+                text(
+                    "UPDATE regulatory_chunks SET embedding = NULL, embedded_at = NULL "
+                    "WHERE document_id = :doc"
+                ),
+                {"doc": outcome.document_id},
+            )
+
+        async with AsyncSession(worker_engine, expire_on_commit=False) as session:
+            embedded = await embed_pending_chunks(
+                session, FakeEmbeddings(), document_id=outcome.document_id
+            )
+        assert embedded == outcome.chunk_count
+
+        async with owner_engine.connect() as conn:
+            pending = (
+                await conn.execute(
+                    text(
+                        "SELECT count(*) FROM regulatory_chunks "
+                        "WHERE document_id = :doc AND embedded_at IS NULL"
+                    ),
+                    {"doc": outcome.document_id},
+                )
+            ).scalar_one()
+        assert pending == 0
+
+
+class TestSupersessionAndStaleness:
+    async def test_supersede_closes_intervals_and_flags_stale_runs(
+        self,
+        ingest_session: AsyncSession,
+        owner_engine: AsyncEngine,
+        app_engine: AsyncEngine,
+        two_orgs: tuple[int, int],
+    ) -> None:
+        old_gazette = STRUCTURED_GAZETTE.replace(
+            "come into force on 1 September 2026", "come into force on 1 January 2024"
+        ).replace("two (2) business days", "five (5) business days")
+
+        async with ingest_session as session:
+            old = await ingest_markdown(
+                session,
+                FakeEmbeddings(),
+                markdown=old_gazette,
+                hints=_hints(title="Old Safeguarding Circular"),
+            )
+            new = await ingest_markdown(
+                session, FakeEmbeddings(), markdown=STRUCTURED_GAZETTE, hints=_hints()
+            )
+
