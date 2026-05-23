@@ -1,0 +1,139 @@
+"""Ingestion end-to-end: quarantine gates, versioning, resumability,
+supersession + staleness, the admin/n8n contract, and real-PDF extraction.
+
+All corpus writes here use jurisdiction SG so the PK temporal truth-table
+fixtures remain byte-identical for the other suites.
+"""
+
+import datetime as dt
+import json
+import uuid
+from pathlib import Path
+
+import pytest
+from httpx import AsyncClient
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
+
+from policydelta.ingestion.service import (
+    IngestHints,
+    embed_pending_chunks,
+    ingest_bytes,
+    ingest_markdown,
+)
+from policydelta.ingestion.supersession import confirm_supersession
+from policydelta.providers import FakeChat, FakeEmbeddings
+from policydelta.retrieval.temporal import in_force_chunks
+from policydelta.worker.runner import Worker
+from tests.chunkers_fixture import (
+    INJECTION_GAZETTE,
+    STRUCTURED_GAZETTE,
+    UNSTRUCTURED_NOTICE,
+    URDU_PRIMARY,
+)
+from tests.conftest import issue_key
+
+pytestmark = [pytest.mark.integration, pytest.mark.anyio]
+
+JURISDICTION = "SG"
+
+
+def _hints(*, title: str = "SECP Circular 21 of 2026", url: str | None = None) -> IngestHints:
+    return IngestHints(
+        source_url=url or f"https://example.test/{uuid.uuid4().hex}.pdf",
+        title=title,
+        issuing_body="SECP",
+        document_type="Circular",
+        jurisdiction=JURISDICTION,
+        published_date=dt.date(2026, 8, 15),
+    )
+
+
+@pytest.fixture
+async def sg_jurisdiction(owner_engine: AsyncEngine) -> None:
+    async with owner_engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO jurisdictions (code, name) VALUES ('SG', 'Singapore') "
+                "ON CONFLICT (code) DO NOTHING"
+            )
+        )
+
+
+@pytest.fixture
+async def ingest_session(worker_engine: AsyncEngine, sg_jurisdiction: None) -> AsyncSession:
+    return AsyncSession(worker_engine, expire_on_commit=False, autoflush=False)
+
+
+async def _in_force_texts(engine: AsyncEngine, as_of: dt.date) -> set[str]:
+    async with AsyncSession(engine) as session:
+        rows = (await session.execute(in_force_chunks(JURISDICTION, as_of))).scalars().all()
+    return {chunk.content for chunk in rows}
+
+
+class TestHappyPath:
+    async def test_structured_gazette_is_confirmed_and_retrievable(
+        self, ingest_session: AsyncSession, app_engine: AsyncEngine
+    ) -> None:
+        async with ingest_session as session:
+            outcome = await ingest_markdown(
+                session, FakeEmbeddings(), markdown=STRUCTURED_GAZETTE, hints=_hints()
+            )
+        assert outcome.status == "confirmed"
+        assert outcome.chunk_count >= 3
+        assert any("Circular No. 5 of 2019" in ref for ref in outcome.supersedes_refs)
+
+        # Effective 1 Sept 2026 (extracted) — in force in October, not in August.
+        october = await _in_force_texts(app_engine, dt.date(2026, 10, 1))
+        august = await _in_force_texts(app_engine, dt.date(2026, 8, 20))
+        assert any("segregated safeguarding" in text_ for text_ in october)
+        assert not any("segregated safeguarding" in text_ for text_ in august)
+
+    async def test_reingest_same_content_is_deduped(self, ingest_session: AsyncSession) -> None:
+        hints = _hints()
+        async with ingest_session as session:
+            first = await ingest_markdown(
+                session, FakeEmbeddings(), markdown=STRUCTURED_GAZETTE, hints=hints
+            )
+            second = await ingest_markdown(
+                session, FakeEmbeddings(), markdown=STRUCTURED_GAZETTE, hints=hints
+            )
+        assert not first.deduped
+        assert second.deduped
+        assert second.document_id == first.document_id
+
+    async def test_corrected_republish_versions_and_quarantines_prior(
+        self, ingest_session: AsyncSession, app_engine: AsyncEngine, owner_engine: AsyncEngine
+    ) -> None:
+        hints = _hints()
+        # Unique day-counts: other tests in this shared-session DB ingest the
+        # base gazette text, so retrieval markers must not collide.
+        original = STRUCTURED_GAZETTE.replace(
+            "two (2) business days", "fourteen (14) business days"
+        )
+        corrected = STRUCTURED_GAZETTE.replace("two (2) business days", "nine (9) business days")
+        async with ingest_session as session:
+            v1 = await ingest_markdown(session, FakeEmbeddings(), markdown=original, hints=hints)
+            v2 = await ingest_markdown(session, FakeEmbeddings(), markdown=corrected, hints=hints)
+        assert v2.document_id != v1.document_id
+
+        async with owner_engine.connect() as conn:
+            rows = (
+                await conn.execute(
+                    text(
+                        "SELECT id, version, extraction_status, review_reason "
+                        "FROM regulatory_documents WHERE source_url = :url ORDER BY version"
+                    ),
+                    {"url": hints.source_url},
+                )
+            ).fetchall()
+        assert [row.version for row in rows] == [1, 2]
+        assert rows[0].extraction_status == "review"
+        assert rows[0].review_reason == "superseded_by_correction"
+        assert rows[1].extraction_status == "confirmed"
+
+        in_force = await _in_force_texts(app_engine, dt.date(2026, 10, 1))
+        assert any("nine (9) business days" in text_ for text_ in in_force)
+        assert not any("fourteen (14) business days" in text_ for text_ in in_force)
+
+
