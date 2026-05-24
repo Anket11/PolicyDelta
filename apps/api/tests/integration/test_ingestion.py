@@ -269,3 +269,139 @@ class TestSupersessionAndStaleness:
                 session, FakeEmbeddings(), markdown=STRUCTURED_GAZETTE, hints=_hints()
             )
 
+        org_a, _ = two_orgs
+        async with owner_engine.begin() as conn:
+            old_chunk_id = (
+                await conn.execute(
+                    text("SELECT id FROM regulatory_chunks WHERE document_id = :doc LIMIT 1"),
+                    {"doc": old.document_id},
+                )
+            ).scalar_one()
+            # Two synthetic past runs: one anchored after the supersession date
+            # (must flag), one before (must not).
+            for as_of, marker in (
+                (dt.date(2026, 10, 1), "affected"),
+                (dt.date(2025, 3, 1), "unaffected"),
+            ):
+                await conn.execute(
+                    text(
+                        "INSERT INTO audit_runs (tenant_id, policy_text_snapshot, "
+                        "jurisdiction, as_of_date, status, retrieved_chunk_ids, stale, "
+                        "total_tokens) VALUES (:tid, :marker, 'SG', :as_of, 'succeeded', "
+                        "CAST(:ids AS jsonb), false, 0)"
+                    ),
+                    {
+                        "tid": org_a,
+                        "marker": marker,
+                        "as_of": as_of,
+                        "ids": json.dumps([old_chunk_id]),
+                    },
+                )
+
+        async with AsyncSession(owner_engine, expire_on_commit=False) as session:
+            report = await confirm_supersession(
+                session,
+                superseded_document_id=old.document_id,
+                superseding_document_id=new.document_id,
+                relation="amends",
+            )
+        assert report.superseded_chunks >= 1
+        assert report.supersession_effective_date == dt.date(2026, 9, 1)
+        assert report.stale_runs_flagged == 1  # only the post-supersession run
+
+        async with owner_engine.connect() as conn:
+            flags = (
+                await conn.execute(
+                    text(
+                        "SELECT policy_text_snapshot, stale FROM audit_runs "
+                        "WHERE jurisdiction = 'SG' ORDER BY id DESC LIMIT 2"
+                    )
+                )
+            ).fetchall()
+        by_marker = {row[0]: row[1] for row in flags}
+        assert by_marker["affected"] is True
+        assert by_marker["unaffected"] is False
+
+        # Temporal handover: old rule governs July 2026, new rule governs October.
+        july = await _in_force_texts(app_engine, dt.date(2026, 7, 1))
+        october = await _in_force_texts(app_engine, dt.date(2026, 10, 1))
+        assert any("five (5) business days" in t for t in july)
+        assert not any("five (5) business days" in t for t in october)
+
+        # Lineage edge recorded:
+        async with owner_engine.connect() as conn:
+            edges = (
+                await conn.execute(
+                    text("SELECT count(*) FROM supersessions WHERE superseded_chunk_id = :cid"),
+                    {"cid": old_chunk_id},
+                )
+            ).scalar_one()
+        assert edges == 1
+
+
+class TestAdminContract:
+    async def test_n8n_flow_post_poll_process(
+        self,
+        api: AsyncClient,
+        owner_engine: AsyncEngine,
+        worker_engine: AsyncEngine,
+        two_orgs: tuple[int, int],
+        sg_jurisdiction: None,
+        tmp_path: Path,
+    ) -> None:
+        admin_key = await issue_key(owner_engine, two_orgs[0], ["admin"])
+        fixture = tmp_path / "gazette.md"
+        fixture.write_text(STRUCTURED_GAZETTE, encoding="utf-8")
+
+        # n8n POSTs hints only — no legal dates in the body.
+        response = await api.post(
+            "/api/v1/admin/ingest",
+            json={
+                "source_url": f"https://example.test/{uuid.uuid4().hex}.pdf",
+                "title": "SECP Circular 21 of 2026",
+                "issuing_body": "SECP",
+                "document_type": "Circular",
+                "jurisdiction": "SG",
+                "published_date": "2026-08-15",
+            },
+            headers={"X-API-Key": admin_key},
+        )
+        assert response.status_code == 202, response.text
+        job = response.json()
+        assert job["status"] == "queued"
+
+        # Point the queued job at the local fixture (test stand-in for the fetch).
+        async with owner_engine.begin() as conn:
+            await conn.execute(
+                text("UPDATE jobs SET payload = payload || CAST(:extra AS jsonb) WHERE id = :id"),
+                {"extra": json.dumps({"file_path": str(fixture)}), "id": job["id"]},
+            )
+
+        worker = Worker(worker_engine, FakeEmbeddings(), FakeChat(), name="test-worker")
+        assert await worker.drain() >= 1
+
+        polled = await api.get(
+            f"/api/v1/admin/ingest/{job['id']}", headers={"X-API-Key": admin_key}
+        )
+        body = polled.json()
+        assert body["status"] == "succeeded"
+        assert body["ref_id"] is not None  # the produced document id
+
+    async def test_unknown_jurisdiction_rejected(
+        self, api: AsyncClient, owner_engine: AsyncEngine, two_orgs: tuple[int, int]
+    ) -> None:
+        admin_key = await issue_key(owner_engine, two_orgs[0], ["admin"])
+        response = await api.post(
+            "/api/v1/admin/ingest",
+            json={
+                "source_url": "https://example.test/x.pdf",
+                "title": "Doc title here",
+                "issuing_body": "SECP",
+                "document_type": "Circular",
+                "jurisdiction": "ZZ",
+                "published_date": "2026-08-15",
+            },
+            headers={"X-API-Key": admin_key},
+        )
+        assert response.status_code == 422
+
