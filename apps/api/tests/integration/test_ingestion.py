@@ -405,3 +405,20 @@ class TestAdminContract:
         )
         assert response.status_code == 422
 
+    async def test_audit_scope_cannot_trigger_ingest(
+        self, api: AsyncClient, owner_engine: AsyncEngine, two_orgs: tuple[int, int]
+    ) -> None:
+        audit_key = await issue_key(owner_engine, two_orgs[0], ["audit"])
+        response = await api.post(
+            "/api/v1/admin/ingest",
+            json={
+                "source_url": "https://example.test/x.pdf",
+                "title": "Doc title here",
+                "issuing_body": "SECP",
+                "document_type": "Circular",
+                "jurisdiction": "PK",
+                "published_date": "2026-08-15",
+            },
+            headers={"X-API-Key": audit_key},
+        )
+        assert response.status_code == 403
