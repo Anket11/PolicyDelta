@@ -1,0 +1,24 @@
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    container_name: policydelta-db
+    environment:
+      # cg_owner is the migration/bootstrap role. Runtime roles (cg_app, cg_worker)
+      # are created BY migrations with least privilege — see docs/ARCHITECTURE.md §3.5.
+      POSTGRES_USER: cg_owner
+      POSTGRES_PASSWORD: cg_owner_dev_password
+      POSTGRES_DB: policydelta
+    ports:
+      # 5433 on the host: avoids colliding with any locally installed Postgres
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./db-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cg_owner -d policydelta"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  pgdata:
